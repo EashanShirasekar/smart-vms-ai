@@ -205,3 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project-specific ignores
+ai_faces.db         # if you later use SQLite for quick testing
+samples/            # raw test face images (optional, keep local only)
