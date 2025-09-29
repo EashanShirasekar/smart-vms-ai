@@ -1,0 +1,9 @@
+opencv-python
+numpy
+pymongo
+deepface
+flask
+fastapi
+uvicorn
+requests
+pillow
