@@ -22,6 +22,8 @@ def run():
         if not ret:
             break
 
+        frame = cv2.flip(frame, 1)
+        
         # DeepFace returns a list of detected faces with embeddings
         try:
             detected_faces = DeepFace.represent(
