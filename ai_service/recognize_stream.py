@@ -28,7 +28,7 @@ def run():
         try:
             detected_faces = DeepFace.represent(
                 img_path = frame,
-                model_name = "Facenet",
+                model_name = "ArcFace",
                 enforce_detection = False
             )
         except Exception as e:
@@ -41,7 +41,7 @@ def run():
             min_dist = min(distances) if distances else 999
             name = "Unknown"
 
-            if distances and min_dist < 0.9:  # tweak threshold if needed
+            if distances and min_dist < 1.2:  # tweak threshold if needed
                 idx = distances.index(min_dist)
                 name = known_names[idx]
 
