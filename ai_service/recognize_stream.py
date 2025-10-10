@@ -41,6 +41,10 @@ def run():
             min_dist = min(distances) if distances else 999
             name = "Unknown"
 
+            # Debugging distance output
+            print(f"[DEBUG] Distances: {['%.3f' % d for d in distances]} | Min: {min_dist:.3f}")
+
+            # Adjust threshold here
             if distances and min_dist < 1.2:  # tweak threshold if needed
                 idx = distances.index(min_dist)
                 name = known_names[idx]
