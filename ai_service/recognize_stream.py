@@ -12,7 +12,6 @@ def is_live_face(frame, prev_gray):
     if prev_gray is not None:
         motion_level = np.linalg.norm(gray.astype("float") - prev_gray.astype("float"))
 
-    # Thresholds tuned for prototype demo
     live = lap_var > 25 and brightness_std > 30 and motion_level > 1.5
     return live, gray, lap_var, brightness_std, motion_level
 
@@ -52,7 +51,6 @@ def run():
             break
         frame = cv2.flip(frame, 1)
 
-        # --- Outer loop: Liveness detection ---
         live, gray, lap_var, brightness_std, motion_level = is_live_face(frame, prev_gray)
         prev_gray = gray
 
@@ -65,7 +63,7 @@ def run():
 
         cv2.putText(frame, "LIVE", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
 
-        # --- Inner loop: Recognition (only if live) ---
+
         results = recognize_face(frame, known_encodings, known_names)
 
         for name, fa, dist in results:
