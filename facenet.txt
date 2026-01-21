@@ -1,0 +1,481 @@
+"""
+Smart Visitor Recognition - Standalone Desktop Application
+Real-time face recognition with webcam feed
+
+CONTROLS:
+- Press 'E' to enroll a new visitor
+- Press 'Q' to quit
+- ESC to cancel enrollment
+"""
+
+import cv2
+import numpy as np
+from deepface import DeepFace
+from retinaface import RetinaFace
+import json
+import os
+from datetime import datetime
+import pickle
+
+class VisitorRecognitionApp:
+    """
+    Standalone desktop app for real-time face recognition
+    """
+    
+    def __init__(self):
+        """Initialize the application"""
+        # Storage paths
+        self.data_dir = "visitor_data"
+        self.embeddings_file = os.path.join(self.data_dir, "embeddings.pkl")
+        self.visitors_file = os.path.join(self.data_dir, "visitors.json")
+        self.photos_dir = os.path.join(self.data_dir, "photos")
+        
+        # Create directories
+        os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.photos_dir, exist_ok=True)
+        
+        # Load existing data
+        self.embeddings = {}  # {visitor_name: embedding_vector}
+        self.visitors = {}    # {visitor_name: metadata}
+        self.load_data()
+        
+        # Recognition settings
+        self.model_name = "Facenet512"
+        self.threshold = 0.40  # Similarity threshold (lower = stricter)
+        
+        # Camera settings
+        self.camera = None
+        self.frame_skip = 5  # Process every 5th frame for recognition (smoother display)
+        self.frame_count = 0
+        
+        # Cache last detection results for smooth display
+        self.last_faces = []
+        self.last_recognitions = []
+        
+        # UI settings
+        self.window_name = "Smart Visitor Recognition"
+        self.font = cv2.FONT_HERSHEY_SIMPLEX
+        
+        # State
+        self.enrolling = False
+        self.enrollment_frames = []
+        
+        print("=" * 60)
+        print("🎯 Smart Visitor Recognition System")
+        print("=" * 60)
+        print(f"✅ Loaded {len(self.visitors)} enrolled visitors")
+        print("\n📹 Starting camera...")
+    
+    def load_data(self):
+        """Load embeddings and visitor data from disk"""
+        try:
+            # Load embeddings
+            if os.path.exists(self.embeddings_file):
+                with open(self.embeddings_file, 'rb') as f:
+                    self.embeddings = pickle.load(f)
+                print(f"✅ Loaded {len(self.embeddings)} face embeddings")
+            
+            # Load visitor metadata
+            if os.path.exists(self.visitors_file):
+                with open(self.visitors_file, 'r') as f:
+                    self.visitors = json.load(f)
+                print(f"✅ Loaded {len(self.visitors)} visitor records")
+        
+        except Exception as e:
+            print(f"⚠️  Error loading data: {e}")
+    
+    def save_data(self):
+        """Save embeddings and visitor data to disk"""
+        try:
+            # Save embeddings
+            with open(self.embeddings_file, 'wb') as f:
+                pickle.dump(self.embeddings, f)
+            
+            # Save visitor metadata
+            with open(self.visitors_file, 'w') as f:
+                json.dump(self.visitors, f, indent=2)
+            
+            print("✅ Data saved successfully")
+        
+        except Exception as e:
+            print(f"⚠️  Error saving data: {e}")
+    
+    def enhance_image(self, image):
+        """Enhance image for better detection in low light"""
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        enhanced = cv2.merge([l, a, b])
+        return cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+    
+    def detect_faces(self, frame):
+        """Detect faces in frame using RetinaFace"""
+        try:
+            # Resize frame for faster detection
+            scale = 0.5
+            small_frame = cv2.resize(frame, None, fx=scale, fy=scale)
+            
+            # Enhance for better detection
+            enhanced = self.enhance_image(small_frame)
+            
+            # Detect faces
+            faces = RetinaFace.detect_faces(enhanced)
+            
+            if not isinstance(faces, dict):
+                return []
+            
+            detected = []
+            for key, face_data in faces.items():
+                if face_data['score'] >= 0.9:  # High confidence only
+                    x1, y1, x2, y2 = face_data['facial_area']
+                    # Scale back to original size
+                    x1, y1, x2, y2 = int(x1/scale), int(y1/scale), int(x2/scale), int(y2/scale)
+                    detected.append({
+                        'box': [x1, y1, x2-x1, y2-y1],
+                        'confidence': face_data['score']
+                    })
+            
+            return detected
+        
+        except Exception as e:
+            return []
+    
+    def generate_embedding(self, face_img):
+        """Generate face embedding using DeepFace"""
+        try:
+            if face_img.size == 0:
+                return None
+            
+            # Resize to minimum size
+            if face_img.shape[0] < 80 or face_img.shape[1] < 80:
+                return None
+            
+            # Generate embedding
+            embedding_objs = DeepFace.represent(
+                img_path=face_img,
+                model_name=self.model_name,
+                enforce_detection=False,
+                detector_backend='skip'
+            )
+            
+            if embedding_objs and len(embedding_objs) > 0:
+                return np.array(embedding_objs[0]['embedding'])
+            
+            return None
+        
+        except Exception as e:
+            return None
+    
+    def recognize_face(self, face_img):
+        """Recognize face by comparing with enrolled visitors"""
+        if len(self.embeddings) == 0:
+            return None
+        
+        # Generate embedding for input face
+        query_embedding = self.generate_embedding(face_img)
+        
+        if query_embedding is None:
+            return None
+        
+        # Find best match
+        best_match = None
+        best_distance = float('inf')
+        
+        for visitor_name, stored_embedding in self.embeddings.items():
+            # Calculate cosine distance
+            distance = self.cosine_distance(query_embedding, stored_embedding)
+            
+            if distance < best_distance:
+                best_distance = distance
+                best_match = visitor_name
+        
+        # Check if match is within threshold
+        if best_match and best_distance <= self.threshold:
+            confidence = 1 - best_distance
+            return {
+                'name': best_match,
+                'confidence': confidence,
+                'distance': best_distance
+            }
+        
+        return None
+    
+    def cosine_distance(self, emb1, emb2):
+        """Calculate cosine distance between two embeddings"""
+        dot_product = np.dot(emb1, emb2)
+        norm1 = np.linalg.norm(emb1)
+        norm2 = np.linalg.norm(emb2)
+        cosine_sim = dot_product / (norm1 * norm2)
+        return 1 - cosine_sim
+    
+    def enroll_visitor(self, frame, visitor_name):
+        """Enroll a new visitor"""
+        print(f"\n📸 Enrolling: {visitor_name}")
+        
+        # Detect faces
+        faces = self.detect_faces(frame)
+        
+        if len(faces) == 0:
+            print("❌ No face detected. Please try again.")
+            return False
+        
+        if len(faces) > 1:
+            print("❌ Multiple faces detected. Please ensure only one person is visible.")
+            return False
+        
+        # Extract face region
+        face = faces[0]
+        x, y, w, h = face['box']
+        
+        # Add padding
+        padding = int(max(w, h) * 0.2)
+        x1 = max(0, x - padding)
+        y1 = max(0, y - padding)
+        x2 = min(frame.shape[1], x + w + padding)
+        y2 = min(frame.shape[0], y + h + padding)
+        
+        face_img = frame[y1:y2, x1:x2]
+        
+        # Generate embedding
+        print("🔄 Generating face embedding...")
+        embedding = self.generate_embedding(face_img)
+        
+        if embedding is None:
+            print("❌ Failed to generate embedding. Please try again with better lighting.")
+            return False
+        
+        # Check for duplicate
+        if visitor_name in self.embeddings:
+            print(f"⚠️  '{visitor_name}' already exists. Overwriting...")
+        
+        # Save embedding
+        self.embeddings[visitor_name] = embedding
+        
+        # Save visitor metadata
+        self.visitors[visitor_name] = {
+            'name': visitor_name,
+            'enrolled_at': datetime.now().isoformat(),
+            'photo_path': os.path.join(self.photos_dir, f"{visitor_name}.jpg")
+        }
+        
+        # Save photo
+        photo_path = self.visitors[visitor_name]['photo_path']
+        cv2.imwrite(photo_path, face_img)
+        
+        # Save to disk
+        self.save_data()
+        
+        print(f"✅ {visitor_name} enrolled successfully!")
+        print(f"   Total enrolled visitors: {len(self.visitors)}")
+        
+        return True
+    
+    def draw_ui(self, frame, faces, recognitions):
+        """Draw UI elements on frame"""
+        # Create overlay
+        overlay = frame.copy()
+        h, w = frame.shape[:2]
+        
+        # Draw status bar at top
+        cv2.rectangle(overlay, (0, 0), (w, 60), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+        
+        # Draw title and stats
+        cv2.putText(frame, "Smart Visitor Recognition", (10, 25),
+                   self.font, 0.7, (255, 255, 255), 2)
+        
+        stats_text = f"Enrolled: {len(self.visitors)} | Detected: {len(faces)}"
+        cv2.putText(frame, stats_text, (10, 50),
+                   self.font, 0.5, (200, 200, 200), 1)
+        
+        # Draw instructions at bottom
+        instructions = [
+            "Press 'E' to Enroll New Visitor",
+            "Press 'Q' to Quit"
+        ]
+        
+        y_pos = h - 60
+        cv2.rectangle(frame, (0, y_pos), (w, h), (0, 0, 0), -1)
+        
+        for idx, instruction in enumerate(instructions):
+            cv2.putText(frame, instruction, (10, y_pos + 20 + idx * 25),
+                       self.font, 0.5, (255, 255, 255), 1)
+        
+        # Draw face detections
+        for idx, face in enumerate(faces):
+            x, y, w, h = face['box']
+            
+            # Get recognition result
+            recognition = recognitions[idx] if idx < len(recognitions) else None
+            
+            if recognition:
+                # Known visitor - Green box
+                color = (0, 255, 0)
+                label = f"{recognition['name']}"
+                confidence_text = f"{recognition['confidence']:.1%}"
+            else:
+                # Unknown - Red box
+                color = (0, 0, 255)
+                label = "Unknown"
+                confidence_text = ""
+            
+            # Draw bounding box
+            cv2.rectangle(frame, (x, y), (x+w, y+h), color, 3)
+            
+            # Draw label background
+            label_size = cv2.getTextSize(label, self.font, 0.8, 2)[0]
+            cv2.rectangle(frame, (x, y - 35), (x + label_size[0] + 10, y), color, -1)
+            
+            # Draw label text
+            cv2.putText(frame, label, (x + 5, y - 10),
+                       self.font, 0.8, (255, 255, 255), 2)
+            
+            # Draw confidence if available
+            if confidence_text:
+                cv2.putText(frame, confidence_text, (x, y + h + 20),
+                           self.font, 0.5, color, 1)
+        
+        return frame
+    
+    def enrollment_mode(self):
+        """Handle enrollment mode"""
+        print("\n" + "=" * 60)
+        print("📋 ENROLLMENT MODE")
+        print("=" * 60)
+        
+        # Get visitor name
+        visitor_name = input("Enter visitor name (or press Enter to cancel): ").strip()
+        
+        if not visitor_name:
+            print("❌ Enrollment cancelled")
+            return
+        
+        print("\n📸 Position your face in the camera frame...")
+        print("   Press SPACE to capture, ESC to cancel")
+        
+        while True:
+            ret, frame = self.camera.read()
+            if not ret:
+                continue
+            
+            # Detect faces
+            faces = self.detect_faces(frame)
+            
+            # Draw simple box for detected face
+            display_frame = frame.copy()
+            for face in faces:
+                x, y, w, h = face['box']
+                cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            
+            # Add instructions
+            cv2.putText(display_frame, f"Enrolling: {visitor_name}", (10, 30),
+                       self.font, 1, (0, 255, 0), 2)
+            cv2.putText(display_frame, "SPACE = Capture | ESC = Cancel", (10, 70),
+                       self.font, 0.7, (255, 255, 255), 2)
+            
+            if len(faces) == 1:
+                cv2.putText(display_frame, "Face detected! Press SPACE", (10, 110),
+                           self.font, 0.7, (0, 255, 0), 2)
+            elif len(faces) > 1:
+                cv2.putText(display_frame, "Multiple faces! Only one person should be visible", 
+                           (10, 110), self.font, 0.6, (0, 0, 255), 2)
+            else:
+                cv2.putText(display_frame, "No face detected", (10, 110),
+                           self.font, 0.7, (0, 0, 255), 2)
+            
+            cv2.imshow(self.window_name, display_frame)
+            
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == 32:  # SPACE - Capture
+                success = self.enroll_visitor(frame, visitor_name)
+                if success:
+                    print("\n✅ Press any key to continue...")
+                    cv2.waitKey(1500)  # Show success for 1.5 seconds
+                break
+            
+            elif key == 27:  # ESC - Cancel
+                print("❌ Enrollment cancelled")
+                break
+    
+    def run(self):
+        """Main application loop"""
+        # Open camera
+        self.camera = cv2.VideoCapture(0)
+        
+        if not self.camera.isOpened():
+            print("❌ Error: Could not open camera")
+            return
+        
+        # Set camera resolution (lower for better performance)
+        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.camera.set(cv2.CAP_PROP_FPS, 30)  # Set FPS
+        
+        print("✅ Camera opened successfully")
+        print("\n" + "=" * 60)
+        print("🎬 CONTROLS:")
+        print("   E = Enroll new visitor")
+        print("   Q = Quit application")
+        print("=" * 60 + "\n")
+        
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        
+        try:
+            while True:
+                ret, frame = self.camera.read()
+                
+                if not ret:
+                    print("⚠️  Failed to read frame")
+                    break
+                
+                self.frame_count += 1
+                
+                # Process every N frames for recognition (but display all frames)
+                if self.frame_count % self.frame_skip == 0:
+                    # Detect faces
+                    faces = self.detect_faces(frame)
+                    
+                    # Recognize faces (only if faces detected)
+                    recognitions = []
+                    if faces:
+                        for face in faces:
+                            x, y, w, h = face['box']
+                            face_img = frame[y:y+h, x:x+w]
+                            result = self.recognize_face(face_img)
+                            recognitions.append(result)
+                    
+                    # Cache results for smooth display
+                    self.last_faces = faces
+                    self.last_recognitions = recognitions
+                
+                # Always draw UI with cached results (smooth display)
+                display_frame = self.draw_ui(frame, self.last_faces, self.last_recognitions)
+                
+                # Show frame
+                cv2.imshow(self.window_name, display_frame)
+                
+                # Handle key presses
+                key = cv2.waitKey(1) & 0xFF
+                
+                if key == ord('q') or key == ord('Q'):
+                    print("\n👋 Quitting application...")
+                    break
+                
+                elif key == ord('e') or key == ord('E'):
+                    self.enrollment_mode()
+        
+        finally:
+            # Cleanup
+            self.camera.release()
+            cv2.destroyAllWindows()
+            print("✅ Application closed")
+
+def main():
+    """Main entry point"""
+    app = VisitorRecognitionApp()
+    app.run()
+
+if __name__ == "__main__":
+    main()
