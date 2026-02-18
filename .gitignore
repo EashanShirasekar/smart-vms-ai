@@ -1,0 +1,218 @@
+# ========================================
+# Python
+# ========================================
+
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+.env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# pyenv
+.python-version
+
+# Pipenv
+Pipfile.lock
+
+# Poetry
+poetry.lock
+
+
+# ========================================
+# Deep Learning / AI Models
+# ========================================
+
+# DeepFace model weights (auto-downloaded)
+.deepface/
+deepface_models/
+weights/
+
+# TensorFlow
+*.h5
+*.hdf5
+*.pb
+saved_model/
+checkpoint
+*.ckpt
+*.ckpt.*
+
+# PyTorch
+*.pt
+*.pth
+*.pth.tar
+
+# ONNX
+*.onnx
+
+
+# ========================================
+# Data & Media
+# ========================================
+
+# Sample images/videos (comment out if you want to include test data)
+samples/
+test_images/
+test_videos/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.avi
+*.mov
+
+# MongoDB exports
+*.bson
+*.json.gz
+dump/
+
+# Datasets
+data/
+datasets/
+raw_data/
+
+
+# ========================================
+# MongoDB
+# ========================================
+
+# MongoDB data directory (if running locally in project folder)
+mongodb_data/
+db_data/
+
+
+# ========================================
+# Logs & Temporary Files
+# ========================================
+
+# Application logs
+*.log
+logs/
+log/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+
+# ========================================
+# IDE / Editor
+# ========================================
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+.idea_modules/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.vim
+
+
+# ========================================
+# Environment Variables
+# ========================================
+
+.env
+.env.local
+.env.*.local
+*.env
+
+
+# ========================================
+# FastAPI / Uvicorn
+# ========================================
+
+# Uvicorn PID files
+*.pid
+
+
+# ========================================
+# Docker (if you add it later)
+# ========================================
+
+docker-compose.override.yml
+.dockerignore
+
+
+# ========================================
+# Project-Specific (Smart VMS)
+# ========================================
+
+# Uploaded visitor photos (if storing locally)
+uploads/
+visitor_photos/
+
+# Camera recordings/screenshots
+recordings/
+screenshots/
+
+# Backup files
+backups/
+*.backup
+
+# Config overrides
+config.local.py
+settings.local.py
