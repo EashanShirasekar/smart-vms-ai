@@ -82,6 +82,11 @@ checkpoint
 *.ckpt
 *.ckpt.*
 
+# TensorFlow large binary files
+*_pywrap_tensorflow_internal.pyd
+*_pywrap_tensorflow_internal.so
+*_pywrap_tensorflow_internal.dylib
+
 # PyTorch
 *.pt
 *.pth
@@ -89,6 +94,12 @@ checkpoint
 
 # ONNX
 *.onnx
+
+# Large library binaries (OpenCV, Clang, etc.)
+*.pyd
+*.dll
+libclang.dll
+cv2.pyd
 
 
 # ========================================
