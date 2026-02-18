@@ -1,0 +1,33 @@
+# Smart Visitor Management System - AI Service
+# Python 3.10 / 3.11 recommended
+
+# ── Web framework ──────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9        # required for File/Form uploads
+
+# ── Face recognition ───────────────────────────────────
+deepface==0.0.92
+tf-keras==2.16.0               # DeepFace 0.0.92 needs this shim
+tensorflow==2.16.1             # CPU-only is fine for demo
+
+# NOTE: RetinaFace is bundled inside deepface as a dependency.
+# If it fails to install automatically, run:
+#   pip install retina-face==0.0.17
+
+# ── Database ───────────────────────────────────────────
+pymongo==4.7.2
+
+# ── Computer vision ────────────────────────────────────
+opencv-python==4.9.0.80
+
+# ── HTTP client (for EventDispatcher) ─────────────────
+httpx==0.27.0
+
+# ── Async / utilities ─────────────────────────────────
+numpy==1.26.4
+
+# ── Dev / testing (optional) ──────────────────────────
+# httpie          # for curl-like API testing from terminal
+# pytest
+# pytest-asyncio

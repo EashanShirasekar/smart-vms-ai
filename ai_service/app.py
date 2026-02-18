@@ -1,37 +1,153 @@
 """
-Smart Visitor Management AI Engine - Main Application
-Production-grade facial recognition and tracking system
+app.py - Smart Visitor Management System — AI Service
+
+FastAPI application that wires together:
+  - Enrollment  (POST /enroll)
+  - Recognition (POST /recognize)
+  - Camera management (POST /cameras/register, /cameras/{id}/start, etc.)
+  - Alerts (GET /alerts)
+  - Visitors (GET /visitors)
+  - Stats / health
 """
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
-from fastapi.responses import StreamingResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, List
-import uvicorn
+from __future__ import annotations
+
+import logging
+import os
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from io import BytesIO
+from typing import Optional, Union
+
 import cv2
 import numpy as np
-from datetime import datetime
-import json
-import base64
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-import sys
-import os
+from behavior_analyzer import BehaviorAnalyzer
+from camera_manager import CameraConfig, CameraManager
+from db import ensure_indexes
+from enrollment_manager import EnrollmentManager
+from event_dispatcher import EventDispatcher
+from recognition_engine import RecognitionEngine
+from tracker import MultiCameraTracker
 
-# Add current directory to Python path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ──────────────────────────────────────────────────────────
+# Logging
+# ──────────────────────────────────────────────────────────
 
-from detection.face_detector import FaceDetector
-from recognition.face_recognizer import FaceRecognizer
-from enrollment.enroll import EnrollmentManager
-from tracking.tracker import MultiCameraTracker
-from alerts.behavior_monitor import BehaviorMonitor
-from camera.camera_manager import CameraManager
-from utils.helpers import decode_image, encode_image
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("smart_vms")
 
-app = FastAPI(title="Smart Visitor Management AI", version="1.0.0")
+# ──────────────────────────────────────────────────────────
+# Component initialisation
+# ──────────────────────────────────────────────────────────
 
-# CORS middleware for cross-origin requests
+recognition_engine = RecognitionEngine()
+enrollment_manager = EnrollmentManager()
+tracker = MultiCameraTracker()
+behavior_analyzer = BehaviorAnalyzer(
+    loitering_threshold_seconds=int(os.getenv("LOITERING_SECONDS", 60)),
+    duplicate_suppression_seconds=int(os.getenv("DUP_SUPPRESS_SECONDS", 30)),
+    unknown_alert_interval_seconds=int(os.getenv("UNKNOWN_ALERT_SECONDS", 45)),
+)
+dispatcher = EventDispatcher(
+    backend_url=os.getenv("BACKEND_WEBHOOK_URL", ""),
+)
+
+
+# ──────────────────────────────────────────────────────────
+# Frame processing pipeline (called by CameraWorker)
+# ──────────────────────────────────────────────────────────
+
+async def on_frame(
+    camera_id: str,
+    location: str,
+    zone_type: str,
+    timestamp: datetime,
+    frame: np.ndarray,
+) -> None:
+    """
+    Process one video frame end-to-end:
+      detect → identify → track → analyse → dispatch
+    """
+    matches = await _run_recognition(frame)
+
+    for match in matches:
+        # 1. Persist tracking event
+        tracker.record(
+            visitor_id=match.visitor_id,
+            name=match.name,
+            camera_id=camera_id,
+            location=location,
+            zone_type=zone_type,
+            confidence=match.confidence,
+            timestamp=timestamp,
+        )
+
+        # 2. Behaviour analysis → alerts
+        alerts = behavior_analyzer.analyze(
+            visitor_id=match.visitor_id,
+            name=match.name,
+            camera_id=camera_id,
+            location=location,
+            zone_type=zone_type,
+            category=match.category,
+            confidence=match.confidence,
+            timestamp=timestamp,
+        )
+
+        # 3. Dispatch alerts to backend (fire-and-forget)
+        for alert in alerts:
+            await dispatcher.dispatch(alert)
+
+
+async def _run_recognition(frame: np.ndarray):
+    """Run recognition in a thread to avoid blocking the event loop."""
+    import asyncio
+    return await asyncio.to_thread(recognition_engine.identify, frame)
+
+
+# ──────────────────────────────────────────────────────────
+# Camera manager (needs on_frame callback)
+# ──────────────────────────────────────────────────────────
+
+camera_manager = CameraManager(on_frame=on_frame)
+
+
+# ──────────────────────────────────────────────────────────
+# App lifespan
+# ──────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀 Smart VMS AI Service starting...")
+    ensure_indexes()
+    recognition_engine.load_embeddings()
+    camera_manager.load_from_db()
+    logger.info("✅ System ready.")
+    yield
+    logger.info("🛑 Shutting down cameras...")
+    await camera_manager.stop_all()
+    await dispatcher.close()
+    logger.info("👋 Shutdown complete.")
+
+
+# ──────────────────────────────────────────────────────────
+# FastAPI app
+# ──────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="Smart Visitor Management AI Service",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,313 +156,254 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize core components
-face_detector = FaceDetector()
-face_recognizer = FaceRecognizer()
-enrollment_manager = EnrollmentManager(face_detector, face_recognizer)
-tracker = MultiCameraTracker()
-behavior_monitor = BehaviorMonitor()
-camera_manager = CameraManager()
 
-# Pydantic models for API
-class EnrollRequest(BaseModel):
-    visitor_id: str
-    name: str
-    metadata: Optional[dict] = {}
+# ──────────────────────────────────────────────────────────
+# Pydantic request models
+# ──────────────────────────────────────────────────────────
 
-class RecognizeRequest(BaseModel):
+class CameraRegisterRequest(BaseModel):
     camera_id: str
-    image_base64: Optional[str] = None
-
-class CameraConfig(BaseModel):
-    camera_id: str
-    stream_url: str
+    source_type: str            # "webcam" | "video" | "rtsp"
+    source_value: Union[int, str]
     location: str
     zone_type: str = "general"
+    target_fps: float = 5.0
 
-class AlertResponse(BaseModel):
-    alert_id: str
-    alert_type: str
-    visitor_id: Optional[str]
-    camera_id: str
-    timestamp: str
-    details: dict
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize system on startup"""
-    print("🚀 Smart Visitor Management AI Engine Starting...")
-    print("✅ Face Detector Ready")
-    print("✅ Face Recognizer Ready")
-    print("✅ Tracker Initialized")
-    print("✅ Behavior Monitor Active")
-    print("🎯 System Ready for Operations")
+# ──────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────
 
-@app.get("/")
-async def root():
-    """Health check endpoint"""
+def _decode_image(contents: bytes) -> np.ndarray:
+    arr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Could not decode image. Ensure it is a valid JPEG or PNG.")
+    return img
+
+
+# ──────────────────────────────────────────────────────────
+# Endpoints
+# ──────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health():
     return {
-        "status": "online",
-        "service": "Smart Visitor Management AI",
-        "version": "1.0.0",
-        "timestamp": datetime.now().isoformat()
+        "status": "ok",
+        "service": "Smart VMS AI",
+        "version": "2.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ── Enrollment ──────────────────────────────────────────
 
 @app.post("/enroll")
 async def enroll_visitor(
-    visitor_id: str,
-    name: str,
-    file: UploadFile = File(...)
+    visitor_id: str = Form(...),
+    name: str = Form(...),
+    category: str = Form("visitor"),
+    file: UploadFile = File(...),
 ):
     """
-    Enroll new visitor with face image
-    
-    Args:
-        visitor_id: Unique visitor identifier
-        name: Visitor full name
-        file: Face image file (jpg, png)
-    
-    Returns:
-        Enrollment confirmation with embedding status
+    Enroll a visitor by uploading their photo.
+
+    Form fields:
+      - visitor_id  (string, unique)
+      - name        (string)
+      - category    (optional: visitor / staff / vip)
+      - file        (image: jpg/png)
     """
+    contents = await file.read()
     try:
-        # Read and decode image
-        contents = await file.read()
-        image = decode_image(contents)
-        
-        # Enroll visitor
-        result = enrollment_manager.enroll_visitor(
+        image = _decode_image(contents)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        result = enrollment_manager.enroll(
             visitor_id=visitor_id,
             name=name,
-            image=image
+            image=image,
+            category=category,
         )
-        
-        if result["success"]:
-            return JSONResponse(content={
-                "success": True,
-                "message": f"Visitor {name} enrolled successfully",
-                "visitor_id": visitor_id,
-                "embedding_generated": True,
-                "face_detected": True,
-                "timestamp": datetime.now().isoformat()
-            })
-        else:
-            raise HTTPException(status_code=400, detail=result.get("error", "Enrollment failed"))
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Enrollment error: {str(e)}")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=result["message"])
+
+    # Reload embeddings so cameras pick up the new face immediately
+    recognition_engine.load_embeddings()
+
+    return JSONResponse(content=result)
+
+
+# ── Recognition ─────────────────────────────────────────
 
 @app.post("/recognize")
-async def recognize_face(file: UploadFile = File(...), camera_id: str = "camera_01"):
+async def recognize_face(
+    camera_id: str = Form("manual"),
+    file: UploadFile = File(...),
+):
     """
-    Recognize face from uploaded image
-    
-    Args:
-        file: Image file containing face
-        camera_id: Camera identifier for tracking
-    
-    Returns:
-        Recognition result with visitor details
-    """
-    try:
-        # Read and decode image
-        contents = await file.read()
-        image = decode_image(contents)
-        
-        # Detect faces
-        faces = face_detector.detect_faces(image)
-        
-        if not faces:
-            return JSONResponse(content={
-                "success": False,
-                "message": "No faces detected",
-                "recognized": False
-            })
-        
-        results = []
-        for face in faces:
-            x, y, w, h = face["box"]
-            face_img = image[y:y+h, x:x+w]
-            
-            # Recognize face
-            match = face_recognizer.recognize(face_img)
-            
-            if match:
-                # Update tracker
-                tracker.update_tracking(
-                    camera_id=camera_id,
-                    visitor_id=match["visitor_id"],
-                    location=face["box"],
-                    timestamp=datetime.now()
-                )
-                
-                results.append({
-                    "recognized": True,
-                    "visitor_id": match["visitor_id"],
-                    "name": match["name"],
-                    "confidence": match["confidence"],
-                    "bounding_box": face["box"]
-                })
-            else:
-                results.append({
-                    "recognized": False,
-                    "message": "Unknown face",
-                    "bounding_box": face["box"]
-                })
-        
-        return JSONResponse(content={
-            "success": True,
-            "faces_detected": len(faces),
-            "results": results,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Recognition error: {str(e)}")
+    Identify faces in an uploaded image (one-shot, not from live camera).
 
-@app.post("/camera/register")
-async def register_camera(config: CameraConfig):
+    Useful for testing / security desk manual check.
     """
-    Register new camera for monitoring
-    
-    Args:
-        config: Camera configuration (ID, URL, location, zone)
-    
-    Returns:
-        Registration confirmation
-    """
+    contents = await file.read()
     try:
-        result = camera_manager.register_camera(
-            camera_id=config.camera_id,
-            stream_url=config.stream_url,
-            location=config.location,
-            zone_type=config.zone_type
-        )
-        
-        return JSONResponse(content={
-            "success": True,
-            "message": "Camera registered successfully",
-            "camera_id": config.camera_id,
-            "location": config.location,
-            "zone_type": config.zone_type
-        })
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Camera registration error: {str(e)}")
+        image = _decode_image(contents)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-@app.get("/camera/list")
-async def list_cameras():
-    """Get list of all registered cameras"""
-    cameras = camera_manager.get_all_cameras()
+    import asyncio
+    matches = await asyncio.to_thread(recognition_engine.identify, image)
+
+    results = [
+        {
+            "visitor_id": m.visitor_id,
+            "name": m.name,
+            "category": m.category,
+            "confidence": round(m.confidence, 4),
+            "bounding_box": m.bounding_box,
+        }
+        for m in matches
+    ]
+
     return JSONResponse(content={
         "success": True,
-        "count": len(cameras),
-        "cameras": cameras
+        "camera_id": camera_id,
+        "faces_detected": len(results),
+        "results": results,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
-@app.post("/track")
-async def track_visitor(visitor_id: str, camera_id: str):
-    """
-    Get tracking history for specific visitor
-    
-    Args:
-        visitor_id: Visitor identifier
-        camera_id: Optional camera filter
-    
-    Returns:
-        Movement history across cameras
-    """
-    try:
-        history = tracker.get_visitor_history(visitor_id, camera_id)
-        
-        return JSONResponse(content={
-            "success": True,
-            "visitor_id": visitor_id,
-            "tracking_history": history,
-            "total_detections": len(history)
-        })
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Tracking error: {str(e)}")
+
+# ── Camera management ────────────────────────────────────
+
+@app.post("/cameras/register")
+async def register_camera(req: CameraRegisterRequest):
+    """Register a camera (webcam, video file, or RTSP)."""
+    config = CameraConfig(
+        camera_id=req.camera_id,
+        source_type=req.source_type,
+        source_value=req.source_value,
+        location=req.location,
+        zone_type=req.zone_type,
+        target_fps=req.target_fps,
+    )
+    camera_manager.register(config)
+    return {"success": True, "message": f"Camera '{req.camera_id}' registered."}
+
+
+@app.post("/cameras/{camera_id}/start")
+async def start_camera(camera_id: str):
+    """Start live processing for a registered camera."""
+    ok = await camera_manager.start(camera_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' not found.")
+    return {"success": True, "message": f"Camera '{camera_id}' started."}
+
+
+@app.post("/cameras/{camera_id}/stop")
+async def stop_camera(camera_id: str):
+    """Stop a running camera worker."""
+    ok = await camera_manager.stop(camera_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' not running.")
+    return {"success": True, "message": f"Camera '{camera_id}' stopped."}
+
+
+@app.get("/cameras")
+async def list_cameras():
+    """List all registered cameras and their status."""
+    cameras = camera_manager.list()
+    return {"success": True, "count": len(cameras), "cameras": list(cameras.values())}
+
+
+# ── Alerts ───────────────────────────────────────────────
 
 @app.get("/alerts")
 async def get_alerts(limit: int = 50):
-    """
-    Get recent security alerts
-    
-    Args:
-        limit: Maximum number of alerts to return
-    
-    Returns:
-        List of recent alerts
-    """
-    try:
-        alerts = behavior_monitor.get_alerts(limit=limit)
-        
-        return JSONResponse(content={
-            "success": True,
-            "alert_count": len(alerts),
-            "alerts": alerts
-        })
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Alert retrieval error: {str(e)}")
+    """Return recent behavior alerts."""
+    alerts = behavior_analyzer.get_recent_alerts(limit=limit)
+    return {"success": True, "count": len(alerts), "alerts": alerts}
+
+
+# ── Visitors ─────────────────────────────────────────────
 
 @app.get("/visitors")
-async def get_enrolled_visitors():
-    """Get list of all enrolled visitors"""
+async def list_visitors():
+    """Return all enrolled visitors."""
     visitors = enrollment_manager.get_all_visitors()
-    
-    return JSONResponse(content={
-        "success": True,
-        "count": len(visitors),
-        "visitors": visitors
-    })
+    return {"success": True, "count": len(visitors), "visitors": visitors}
 
-@app.delete("/visitor/{visitor_id}")
+
+@app.get("/visitors/{visitor_id}")
+async def get_visitor(visitor_id: str):
+    visitor = enrollment_manager.get_visitor(visitor_id)
+    if not visitor:
+        raise HTTPException(status_code=404, detail="Visitor not found.")
+    return {"success": True, "visitor": visitor}
+
+
+@app.delete("/visitors/{visitor_id}")
 async def delete_visitor(visitor_id: str):
-    """
-    Remove visitor from system
-    
-    Args:
-        visitor_id: Visitor identifier to remove
-    
-    Returns:
-        Deletion confirmation
-    """
-    try:
-        result = enrollment_manager.delete_visitor(visitor_id)
-        
-        if result["success"]:
-            return JSONResponse(content={
-                "success": True,
-                "message": f"Visitor {visitor_id} removed successfully"
-            })
-        else:
-            raise HTTPException(status_code=404, detail="Visitor not found")
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Deletion error: {str(e)}")
+    result = enrollment_manager.delete_visitor(visitor_id)
+    if not result["success"]:
+        raise HTTPException(status_code=404, detail=result["message"])
+    recognition_engine.load_embeddings()
+    return result
+
+
+# ── Embeddings ───────────────────────────────────────────
+
+@app.post("/embeddings/reload")
+async def reload_embeddings():
+    """Force-reload face embeddings from MongoDB into memory."""
+    count = recognition_engine.load_embeddings()
+    return {"success": True, "embeddings_loaded": count}
+
+
+# ── Tracking ─────────────────────────────────────────────
+
+@app.get("/tracking/{visitor_id}")
+async def get_visitor_tracking(visitor_id: str, limit: int = 50):
+    """Get movement history for a specific visitor."""
+    history = tracker.get_visitor_history(visitor_id, limit=limit)
+    return {"success": True, "visitor_id": visitor_id, "history": history}
+
+
+# ── Stats ────────────────────────────────────────────────
 
 @app.get("/stats")
-async def get_system_stats():
-    """Get system statistics and metrics"""
-    return JSONResponse(content={
+async def get_stats():
+    visitors = enrollment_manager.get_all_visitors()
+    cameras = camera_manager.list()
+    alerts = behavior_analyzer.get_recent_alerts(limit=1000)
+    return {
         "success": True,
-        "statistics": {
-            "enrolled_visitors": len(enrollment_manager.get_all_visitors()),
-            "active_cameras": len(camera_manager.get_all_cameras()),
-            "total_alerts": len(behavior_monitor.get_alerts(limit=1000)),
-            "system_uptime": "operational",
-            "timestamp": datetime.now().isoformat()
-        }
-    })
+        "stats": {
+            "enrolled_visitors": len(visitors),
+            "registered_cameras": len(cameras),
+            "active_cameras": sum(1 for c in cameras.values() if c["active"]),
+            "total_alerts": len(alerts),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+
+
+# ──────────────────────────────────────────────────────────
+# Entry point
+# ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(
         "app:app",
-        host="127.0.0.1",  # Changed from 0.0.0.0 to localhost
+        host="127.0.0.1",
         port=8000,
-        reload=True,
-        log_level="info"
+        reload=False,   # reload=True breaks asyncio tasks — keep False
+        log_level="info",
     )
