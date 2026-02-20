@@ -31,6 +31,7 @@ from camera_manager import CameraConfig, CameraManager
 from db import ensure_indexes
 from enrollment_manager import EnrollmentManager
 from event_dispatcher import EventDispatcher
+from geofence_monitor import GeofenceMonitor
 from recognition_engine import RecognitionEngine
 from tracker import MultiCameraTracker
 
@@ -56,6 +57,10 @@ behavior_analyzer = BehaviorAnalyzer(
     duplicate_suppression_seconds=int(os.getenv("DUP_SUPPRESS_SECONDS", 30)),
     unknown_alert_interval_seconds=int(os.getenv("UNKNOWN_ALERT_SECONDS", 45)),
 )
+geofence_monitor = GeofenceMonitor(
+    violation_threshold_seconds=int(os.getenv("GEOFENCE_VIOLATION_SECONDS", 60)),
+    duplicate_suppression_seconds=int(os.getenv("DUP_SUPPRESS_SECONDS", 30)),
+)
 dispatcher = EventDispatcher(
     backend_url=os.getenv("BACKEND_WEBHOOK_URL", ""),
 )
@@ -74,11 +79,18 @@ async def on_frame(
 ) -> None:
     """
     Process one video frame end-to-end:
-      detect → identify → track → analyse → dispatch
+      detect → identify → track → analyse → geofence check → dispatch
     """
     matches = await _run_recognition(frame)
 
     for match in matches:
+        # Calculate face centroid for geofencing
+        bbox = match.bounding_box
+        centroid = (
+            bbox['x'] + bbox['w'] // 2,
+            bbox['y'] + bbox['h'] // 2,
+        )
+
         # 1. Persist tracking event
         tracker.record(
             visitor_id=match.visitor_id,
@@ -90,7 +102,7 @@ async def on_frame(
             timestamp=timestamp,
         )
 
-        # 2. Behaviour analysis → alerts
+        # 2. Behaviour analysis → alerts (restricted zone, unknown, re-entry)
         alerts = behavior_analyzer.analyze(
             visitor_id=match.visitor_id,
             name=match.name,
@@ -102,7 +114,20 @@ async def on_frame(
             timestamp=timestamp,
         )
 
-        # 3. Dispatch alerts to backend (fire-and-forget)
+        # 3. Geofence monitoring → loitering alerts
+        geofence_alert = geofence_monitor.check_position(
+            visitor_id=match.visitor_id,
+            name=match.name,
+            camera_id=camera_id,
+            position=centroid,
+            location=location,
+            confidence=match.confidence,
+            timestamp=timestamp,
+        )
+        if geofence_alert:
+            alerts.append(geofence_alert)
+
+        # 4. Dispatch all alerts to backend (fire-and-forget)
         for alert in alerts:
             await dispatcher.dispatch(alert)
 
@@ -130,6 +155,15 @@ async def lifespan(app: FastAPI):
     ensure_indexes()
     recognition_engine.load_embeddings()
     camera_manager.load_from_db()
+    
+    # Load geofence boundaries from files
+    from pathlib import Path
+    boundaries_dir = Path("boundaries")
+    if boundaries_dir.exists():
+        for boundary_file in boundaries_dir.glob("*_boundary.json"):
+            camera_id = boundary_file.stem.replace("_boundary", "")
+            geofence_monitor.load_boundary(camera_id, str(boundary_file))
+    
     logger.info("✅ System ready.")
     yield
     logger.info("🛑 Shutting down cameras...")
@@ -373,6 +407,54 @@ async def get_visitor_tracking(visitor_id: str, limit: int = 50):
     """Get movement history for a specific visitor."""
     history = tracker.get_visitor_history(visitor_id, limit=limit)
     return {"success": True, "visitor_id": visitor_id, "history": history}
+
+
+# ── Geofencing ───────────────────────────────────────────
+
+@app.post("/cameras/{camera_id}/set-boundary")
+async def set_geofence_boundary(
+    camera_id: str,
+    points: List[List[int]],  # [[x1,y1], [x2,y2], ...]
+):
+    """
+    Manually set geofence boundary for a camera.
+    
+    Alternative to using boundary_setup.py — useful for API-driven configuration.
+    """
+    if len(points) < 3:
+        raise HTTPException(status_code=400, detail="Need at least 3 points for a boundary")
+    
+    # Convert to tuple format
+    boundary_points = [tuple(p) for p in points]
+    geofence_monitor.set_boundary(camera_id, boundary_points)
+    
+    return {
+        "success": True,
+        "message": f"Boundary set for camera '{camera_id}'",
+        "num_points": len(points),
+    }
+
+
+@app.get("/cameras/{camera_id}/boundary")
+async def get_geofence_boundary(camera_id: str):
+    """Get the current boundary configuration for a camera."""
+    boundary = geofence_monitor.get_boundary(camera_id)
+    if not boundary:
+        raise HTTPException(status_code=404, detail=f"No boundary defined for camera '{camera_id}'")
+    
+    return {
+        "success": True,
+        "camera_id": camera_id,
+        "points": boundary.points,
+        "num_points": len(boundary.points),
+    }
+
+
+@app.get("/alerts/geofence")
+async def get_geofence_alerts(limit: int = 50):
+    """Return recent geofence violation alerts only."""
+    alerts = geofence_monitor.get_recent_alerts(limit=limit)
+    return {"success": True, "count": len(alerts), "alerts": alerts}
 
 
 # ── Stats ────────────────────────────────────────────────

@@ -121,6 +121,10 @@ class CameraWorker:
                     await asyncio.sleep(0.5)
                     continue
 
+                # Flip frame horizontally for webcams (fixes mirror image)
+                if self.config.source_type == "webcam":
+                    frame = cv2.flip(frame, 1)
+
                 timestamp = datetime.now(timezone.utc)
 
                 try:

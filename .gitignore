@@ -2,6 +2,9 @@
 # Python
 # ========================================
 
+# module
+node_modules
+
 # Virtual environment
 venv/
 env/

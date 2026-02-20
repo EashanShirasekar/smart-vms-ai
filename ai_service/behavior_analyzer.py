@@ -137,16 +137,10 @@ class BehaviorAnalyzer:
 
         dwell = self._presence[pk].last_seen - self._presence[pk].first_seen
 
-        # 1. Loitering
-        if dwell >= self._loitering_threshold:
-            if self._should_emit(visitor_id, camera_id, "loitering", now):
-                alerts.append(self._emit(
-                    visitor_id, name, camera_id, location,
-                    "loitering", confidence, now,
-                    {"dwell_seconds": int(dwell.total_seconds())}
-                ))
+        # Note: Generic camera-level loitering has been REMOVED.
+        # Use geofence_monitor.py for spatial loitering detection instead.
 
-        # 2. Restricted zone entry (fire on every new arrival window)
+        # 1. Restricted zone entry (fire on every new arrival window)
         if zone_type.lower() == "restricted":
             if self._should_emit(visitor_id, camera_id, "restricted_zone_entry", now):
                 alerts.append(self._emit(
@@ -154,7 +148,7 @@ class BehaviorAnalyzer:
                     "restricted_zone_entry", confidence, now
                 ))
 
-        # 3. Unknown person
+        # 2. Unknown person
         if visitor_id == "unknown":
             if (now - self._last_unknown[camera_id]) >= self._unknown_interval:
                 if self._should_emit(visitor_id, camera_id, "unknown_person", now):
@@ -164,7 +158,7 @@ class BehaviorAnalyzer:
                         "unknown_person", confidence, now
                     ))
 
-        # 4. Re-entry without exit (only for known visitors)
+        # 3. Re-entry without exit (only for known visitors)
         if visitor_id != "unknown":
             self._check_entry_exit(visitor_id, name, camera_id, location,
                                    confidence, now, alerts)
@@ -174,8 +168,9 @@ class BehaviorAnalyzer:
     def get_recent_alerts(self, limit: int = 100) -> List[Dict]:
         """Fetch persisted alerts from MongoDB."""
         alert_types = {
-            "loitering", "restricted_zone_entry",
-            "unknown_person", "re_entry_without_exit",
+            "restricted_zone_entry",
+            "unknown_person",
+            "re_entry_without_exit",
         }
         projection = {"_id": 0}
         cursor = (
