@@ -180,6 +180,8 @@ app = FastAPI(
     title="Smart Visitor Management AI Service",
     version="2.0.0",
     lifespan=lifespan,
+    docs_url=None,  # Disable Swagger UI
+    redoc_url=None,  # Disable ReDoc
 )
 
 app.add_middleware(
